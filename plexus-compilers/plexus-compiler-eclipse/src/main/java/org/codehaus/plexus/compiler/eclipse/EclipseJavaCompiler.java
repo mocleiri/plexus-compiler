@@ -28,6 +28,7 @@ import org.codehaus.plexus.compiler.AbstractCompiler;
 import org.codehaus.plexus.compiler.CompilerConfiguration;
 import org.codehaus.plexus.compiler.CompilerException;
 import org.codehaus.plexus.compiler.CompilerMessage;
+import org.codehaus.plexus.compiler.CompilerMessage.Kind;
 import org.codehaus.plexus.compiler.CompilerOutputStyle;
 import org.codehaus.plexus.compiler.CompilerResult;
 import org.codehaus.plexus.util.FileUtils;
@@ -60,16 +61,21 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.StringTokenizer;
+import java.util.jar.Attributes.Name;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
+import java.util.jar.Manifest;
 
 /**
  * @plexus.component role="org.codehaus.plexus.compiler.Compiler" role-hint="eclipse"
@@ -86,6 +92,8 @@ public class EclipseJavaCompiler
     // Compiler Implementation
     // ----------------------------------------------------------------------
     boolean errorsAsWarnings = false;
+
+    private JarOutputStream jos;
 
     public CompilerResult performCompile( CompilerConfiguration config )
         throws CompilerException
@@ -233,8 +241,22 @@ public class EclipseJavaCompiler
 
         ICompilationUnit[] units = compilationUnits.toArray( new ICompilationUnit[compilationUnits.size()] );
 
-        compiler.compile( units );
+        // open jar file
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().put(Name.MANIFEST_VERSION, "1.0");
 
+        try {
+            jos = new JarOutputStream(new FileOutputStream(new File(config.getBuildDirectory(), "compiled-classes.jar")), manifest);
+
+            compiler.compile(units);
+
+            // close jar file
+
+            jos.close();
+        }
+        catch (IOException e) {
+            errors.add(new CompilerMessage("compiled-classes.jar", Kind.ERROR, -1, -1, -1, -1, e.getMessage()));
+        }
         CompilerResult compilerResult = new CompilerResult().compilerMessages( errors );
 
         for ( CompilerMessage compilerMessage : errors )
@@ -406,6 +428,7 @@ public class EclipseJavaCompiler
         {
             try
             {
+//                return org.apache.commons.io.FileUtils.readFileToString(new File (sourceFile), sourceEncoding).toCharArray();
                 return FileUtils.fileRead( sourceFile, sourceEncoding ).toCharArray();
             }
             catch ( FileNotFoundException e )
@@ -602,98 +625,81 @@ public class EclipseJavaCompiler
     }
 
     private class EclipseCompilerICompilerRequestor
-        implements ICompilerRequestor
-    {
+            implements ICompilerRequestor {
         private String destinationDirectory;
 
         private List<CompilerMessage> errors;
 
-        public EclipseCompilerICompilerRequestor( String destinationDirectory, List<CompilerMessage> errors )
-        {
+        public EclipseCompilerICompilerRequestor(String destinationDirectory, List<CompilerMessage> errors) {
             this.destinationDirectory = destinationDirectory;
             this.errors = errors;
         }
 
-        public void acceptResult( CompilationResult result )
-        {
+        public void acceptResult(CompilationResult result) {
             boolean hasErrors = false;
 
-            if ( result.hasProblems() )
-            {
+            if (result.hasProblems()) {
                 IProblem[] problems = result.getProblems();
 
-                for ( IProblem problem : problems )
-                {
-                    String name = getFileName( result.getCompilationUnit(), problem.getOriginatingFileName() );
+                for (IProblem problem : problems) {
+                    String name = getFileName(result.getCompilationUnit(), problem.getOriginatingFileName());
 
-                    if ( problem.isWarning() )
-                    {
-                        errors.add( handleWarning( name, problem ) );
-                    }
-                    else
-                    {
-                    	if( errorsAsWarnings )
-                    	{
-                    		errors.add( handleWarning( name, problem ) );
-                    	}
-                    	else
-                    	{
-                    		hasErrors = true;
-                    		errors.add( handleError( name, problem.getSourceLineNumber(), -1, problem.getMessage() ) );
-                    	}
+                    if (problem.isWarning()) {
+                        errors.add(handleWarning(name, problem));
+                    } else {
+                        if (errorsAsWarnings) {
+                            errors.add(handleWarning(name, problem));
+                        } else {
+                            hasErrors = true;
+                            errors.add(handleError(name, problem.getSourceLineNumber(), -1, problem.getMessage()));
+                        }
                     }
                 }
             }
 
-            if ( !hasErrors )
-            {
+            if (!hasErrors) {
                 ClassFile[] classFiles = result.getClassFiles();
 
-                for ( ClassFile classFile : classFiles )
-                {
-                    char[][] compoundName = classFile.getCompoundName();
-                    String className = "";
-                    String sep = "";
+                try {
 
-                    for ( int j = 0; j < compoundName.length; j++ )
-                    {
-                        className += sep;
-                        className += new String( compoundName[j] );
-                        sep = ".";
+                    // used as the timestamp for the jar entries.
+                    long timestamp = new Date().getTime();
+
+                    for (ClassFile classFile : classFiles) {
+
+                        char[][] compoundName = classFile.getCompoundName();
+
+                        String sep = "";
+
+                        StringBuilder className = new StringBuilder();
+
+                        for (int j = 0; j < compoundName.length; j++) {
+                            className.append(sep);
+                            className.append(compoundName[j]);
+                            sep = "/";
+                        }
+
+                        className.append(".class");
+
+                        JarEntry entry = new JarEntry(className.toString());
+
+                        entry.setTime(timestamp);
+
+                        jos.putNextEntry(entry);
+
+                        jos.write(classFile.getBytes());
+
+                        jos.closeEntry();
+
                     }
 
-                    byte[] bytes = classFile.getBytes();
-
-                    File outFile = new File( destinationDirectory, className.replace( '.', '/' ) + ".class" );
-
-                    if ( !outFile.getParentFile().exists() )
-                    {
-                        outFile.getParentFile().mkdirs();
-                    }
-
-                    FileOutputStream fout = null;
-
-                    try
-                    {
-                        fout = new FileOutputStream( outFile );
-
-                        fout.write( bytes );
-                    }
-                    catch ( FileNotFoundException e )
-                    {
-                        errors.add( handleError( className, -1, -1, e.getMessage() ) );
-                    }
-                    catch ( IOException e )
-                    {
-                        errors.add( handleError( className, -1, -1, e.getMessage() ) );
-                    }
-                    finally
-                    {
-                        IOUtil.close( fout );
-                    }
+                } catch (Exception e2) {
+                    hasErrors = true;
+                    errors.add(new CompilerMessage( "compiled-sources.jar", CompilerMessage.Kind.ERROR, -1, -1, -1, -1, e2.getMessage() ));
                 }
             }
         }
+
 
         private String getFileName( ICompilationUnit compilationUnit, char[] originalFileName )
         {
